@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Chroma / Vector DB
+data/
+chroma/
+*.sqlite3
+
+# Logs
+*.log
+
+# Chat persistence (optional – remove if you WANT to track chats)
+chat_store.json
+rag_chatbot.db

@@ -1,0 +1,31 @@
+# ---------- Core Backend ----------
+fastapi==0.110.0
+uvicorn==0.27.1
+
+# ---------- Environment ----------
+python-dotenv==1.0.1
+
+# ---------- Authentication & Security ----------
+python-jose==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ---------- LangChain & OpenAI ----------
+langchain==0.1.16
+langchain-community==0.0.34
+langchain-openai==0.1.6
+tiktoken==0.6.0
+
+# ---------- Vector Database ----------
+chromadb==0.4.24
+
+# ---------- Document Processing ----------
+pypdf==4.1.0
+python-docx==1.1.0
+
+# ---------- File Upload ----------
+python-multipart==0.0.9
+
+# ---------- Frontend ----------
+streamlit==1.32.2
+requests==2.31.0
+sqlalchemy==2.0.27
