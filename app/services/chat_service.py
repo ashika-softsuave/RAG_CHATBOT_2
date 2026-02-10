@@ -1,96 +1,145 @@
+import json
 from app.core.llm import llm
 from app.services.rag_service import rag_answer
 from app.services.summarizer import summarize_chat
 from app.services.query_rewrite import rewrite_query
-from app.utils.query_router import is_doc_question
+
+SUMMARY_TRIGGER = 10
 
 
-def handle_chat(query: str, history: list[str], followup_answer: str | None = None) -> str:
-    """
-    Core chat handler.
-    - Understands natural language
-    - Resolves references
-    - Uses RAG when relevant
-    - Always answers (ChatGPT-like behavior)
-    """
+def analyze_intent(text: str, history: list[str], awaiting_followup: bool) -> dict:
+    prompt = f"""
+You are an intent classification engine.
 
-    #SAFETY
+Return ONLY valid JSON.
+
+Conversation history:
+{history}
+
+User message:
+"{text}"
+
+Is the system awaiting a follow-up answer?
+{awaiting_followup}
+
+Return JSON ONLY:
+{{
+  "intent": "greeting | document_question | followup_answer | small_talk",
+  "is_yes": true | false | null,
+  "is_no": true | false | null
+}}
+"""
+    response = llm.invoke(prompt).content.strip()
+
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        return {
+            "intent": "document_question",
+            "is_yes": None,
+            "is_no": None
+        }
+
+
+def generate_followup(answer: str) -> str:
+    prompt = f"""
+You are SoftSuave's AI assistant.
+
+Based on the answer below, ask ONE relevant follow-up question
+strictly related to SoftSuave company documents.
+
+Answer:
+{answer}
+
+Return ONLY the follow-up question.
+"""
+    return llm.invoke(prompt).content.strip()
+
+
+def handle_chat(
+    query: str,
+    history: list[str],
+    followup_answer: str | None = None,
+    awaiting_followup: bool = False
+) -> dict:
+
     history = history or []
 
-    # NATURAL LANGUAGE REWRITE (FULL CONTEXT)
-    # This fixes spelling, resolves "their / your company / it", anchors entities
+    # ---------- 1. INTENT ANALYSIS ----------
+    text_to_analyze = followup_answer if awaiting_followup else query
+    intent = analyze_intent(text_to_analyze, history, awaiting_followup)
+
+    # ---------- 2. GREETING / SMALL TALK ----------
+    if intent["intent"] in {"greeting", "small_talk"}:
+        reply = llm.invoke(
+            f"You are SoftSuave's AI assistant. Respond politely to:\n{text_to_analyze}"
+        ).content.strip()
+
+        followup = generate_followup(reply)
+
+        return {
+            "reply": reply,
+            "awaiting_followup": True,
+            "followup_question": followup
+        }
+
+    # ---------- 3. FOLLOW-UP YES / NO ----------
+    if intent["intent"] == "followup_answer":
+        if intent["is_no"]:
+            reply = llm.invoke(
+                "User said no. Politely offer another SoftSuave document-related topic."
+            ).content.strip()
+
+            followup = generate_followup(reply)
+
+            return {
+                "reply": reply,
+                "awaiting_followup": True,
+                "followup_question": followup
+            }
+
+        if intent["is_yes"]:
+            query = rewrite_query(query, history)
+
+    # ---------- 4. SUMMARIZATION ----------
+    if len(history) >= SUMMARY_TRIGGER * 2:
+        summary = summarize_chat(history)
+        history = summary
+
+    # ---------- 5. QUERY NORMALIZATION ----------
     rewritten_query = rewrite_query(query, history)
 
-    if followup_answer:
-        rewritten_query = rewrite_query(
-            rewritten_query,
-            history + [f"User answered: {followup_answer}"]
-        )
+    # ---------- 6. RAG ----------
+    answer = rag_answer(rewritten_query, history)
 
-    #SUMMARIZE HISTORY (TOKEN CONTROL)
-    summarized_history = summarize_chat(history)
+    if not answer or len(answer.strip()) < 30:
+        reply = llm.invoke(
+            "Politely state the information is not available in SoftSuave documents."
+        ).content.strip()
 
-    #ANSWERING STRATEGY
-    answer = None
-    used_rag = False
+        followup = generate_followup(reply)
 
-    # Try RAG first ONLY if it looks document-related
-    if is_doc_question(rewritten_query):
-        try:
-            answer = rag_answer(rewritten_query, summarized_history)
-            used_rag = True
-        except Exception:
-            answer = None  # Fail silently → fallback to LLM
+        return {
+            "reply": reply,
+            "awaiting_followup": True,
+            "followup_question": followup
+        }
 
-    #ALWAYS FALLBACK TO LLM
-    if not answer or len(answer.strip()) < 20:
-        llm_prompt = f"""
-You are a helpful, confident AI assistant.
+    # ---------- 7. FINAL DOCUMENT ANSWER ----------
+    final_answer = llm.invoke(
+        f"""
+You are SoftSuave's official AI assistant.
+Answer ONLY using the document content below.
 
-Answer the question as best as you can.
-- Use reasoning if information is incomplete.
-- Do NOT refuse unless unsafe.
-- Do NOT mention limitations unless explicitly asked.
-- Be clear, concise, and helpful.
-
-Question:
-{rewritten_query}
+Document content:
+{answer}
 """
-        answer = llm.invoke(llm_prompt).content
-        used_rag = False
+    ).content.strip()
 
-    #OPTIONAL FOLLOW-UP QUESTION
-    if (
-        used_rag
-        and followup_answer is None
-        and len(answer.split()) > 60
-    ):
-        return f"{answer}\n\n❓ Would you like me to go deeper into this?"
+    followup = generate_followup(final_answer)
 
-    return answer
-# from app.core.llm import llm
-# from app.services.rag_service import rag_answer
-# from app.services.summarizer import summarize_chat
-# from app.services.query_rewrite import rewrite_query
-# from app.utils.query_router import is_doc_question
-#
-# def handle_chat(query, history, followup_answer=None):
-#     history = summarize_chat(history)
-#
-#     # 🔑 Natural language rewrite (always safe)
-#     query = rewrite_query(query, history)
-#
-#     if followup_answer:
-#         query = rewrite_query(query, history + [f"User answered: {followup_answer}"])
-#
-#     if is_doc_question(query):
-#         answer = rag_answer(query, history)
-#         needs_followup = True
-#     else:
-#         answer = llm.invoke(query).content
-#         needs_followup = False
-#
-#     if needs_followup and followup_answer is None and len(answer.split()) > 50:
-#         return f"{answer}\n\n❓ Do you want more details?"
-#
-#     return answer
+    return {
+        "reply": final_answer,
+        "awaiting_followup": True,
+        "followup_question": followup
+    }
