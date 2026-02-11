@@ -11,7 +11,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# ================= PERSISTENCE =================
+# PERSISTENCE
 STORE_FILE = "chat_store.json"
 
 def load_store():
@@ -24,7 +24,7 @@ def save_store(data):
     with open(STORE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-# ================= STYLE =================
+#STYLE
 st.markdown("""
 <style>
 .chat-user {
@@ -46,7 +46,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= SESSION STATE =================
+#SESSION STATE
 if "token" not in st.session_state:
     st.session_state.token = None
 
@@ -62,7 +62,7 @@ if "current_chat" not in st.session_state:
 if "awaiting_followup" not in st.session_state:
     st.session_state.awaiting_followup = False
 
-# ================= AUTH =================
+#AUTH
 def login_user(username, password):
     res = requests.post(
         f"{API_BASE}/auth/login",
@@ -80,7 +80,7 @@ def signup_user(username, password):
     )
     return res.status_code == 200
 
-# ================= LOGIN PAGE =================
+#LOGIN PAGE
 if not st.session_state.token:
     st.title("🔐 SoftSuave RAG Chatbot")
 
@@ -106,7 +106,7 @@ if not st.session_state.token:
 
     st.stop()
 
-# ================= SIDEBAR =================
+# SIDEBAR
 with st.sidebar:
     st.markdown("## 🚀 Projects")
 
@@ -152,7 +152,7 @@ with st.sidebar:
         st.session_state.awaiting_followup = False
         st.rerun()
 
-# ================= MAIN CHAT =================
+# MAIN CHAT
 st.title("🤖 SoftSuave AI Assistant")
 
 if not st.session_state.current_project or not st.session_state.current_chat:
@@ -170,7 +170,7 @@ for msg in chat["messages"]:
     else:
         st.markdown(f"<div class='chat-bot'>{msg['content']}</div>", unsafe_allow_html=True)
 
-# ================= CHAT INPUT =================
+# CHAT INPUT
 query = st.chat_input("Ask anything related to SoftSuave documents...")
 
 if query:
@@ -182,6 +182,7 @@ if query:
         "history": chat["history"],
         "followup_answer": query if st.session_state.awaiting_followup else None,
         "awaiting_followup": st.session_state.awaiting_followup
+
     }
 
     res = requests.post(
@@ -196,7 +197,7 @@ if query:
         reply = data["reply"]
         chat["messages"].append({"role": "assistant", "content": reply})
 
-        # 🔑 follow-up state
+        # follow-up state
         st.session_state.awaiting_followup = data["awaiting_followup"]
 
         save_store(st.session_state.projects)

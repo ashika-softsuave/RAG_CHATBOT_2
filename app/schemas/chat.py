@@ -5,3 +5,4 @@ class ChatRequest(BaseModel):
     query: str
     history: List[str] = []
     followup_answer: Optional[str] = None
+    awaiting_followup: bool = False

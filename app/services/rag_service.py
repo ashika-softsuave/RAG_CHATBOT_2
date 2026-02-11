@@ -7,7 +7,10 @@ def rag_answer(query: str, history: list[str]) -> str | None:
     Returns None if answer is not present.
     """
 
+
     vectordb = get_vectorstore()
+    print(vectordb)
+    print(vectordb)
     docs = vectordb.similarity_search(query, k=3)
 
     if not docs:
@@ -17,7 +20,7 @@ def rag_answer(query: str, history: list[str]) -> str | None:
 
     prompt = f"""
 You are SoftSuave's internal AI assistant.
-
+#
 Rules:
 - Answer ONLY using the provided context.
 - Do NOT use external knowledge.

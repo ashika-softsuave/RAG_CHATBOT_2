@@ -10,7 +10,7 @@ def chat(req: ChatRequest, user: str = Depends(get_current_user)):
     result = handle_chat(
         query=req.query,
         history=req.history,
-        followup_answer=req.followup_answer
+        followup_answer=req.followup_answer,
+        awaiting_followup=req.awaiting_followup
     )
-
     return result

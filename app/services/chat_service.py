@@ -33,7 +33,7 @@ Return JSON ONLY:
 
     try:
         return json.loads(response)
-    except json.JSONDecodeError:
+    except:
         return {
             "intent": "document_question",
             "is_yes": None,
@@ -45,13 +45,14 @@ def generate_followup(answer: str) -> str:
     prompt = f"""
 You are SoftSuave's AI assistant.
 
-Based on the answer below, ask ONE relevant follow-up question
+Based on the answer below,
+generate ONE meaningful follow-up question
 strictly related to SoftSuave company documents.
 
 Answer:
 {answer}
 
-Return ONLY the follow-up question.
+Return ONLY the question.
 """
     return llm.invoke(prompt).content.strip()
 
@@ -65,71 +66,80 @@ def handle_chat(
 
     history = history or []
 
-    # ---------- 1. INTENT ANALYSIS ----------
+    #AUTO SUMMARY EVERY 10 USER TURNS
+    user_turns = len([h for h in history if h.startswith("User:")])
+    if user_turns and user_turns % SUMMARY_TRIGGER == 0:
+        history = summarize_chat(history)
+
+    # INTENT ANALYSIS
     text_to_analyze = followup_answer if awaiting_followup else query
     intent = analyze_intent(text_to_analyze, history, awaiting_followup)
 
-    # ---------- 2. GREETING / SMALL TALK ----------
+    # FOLLOW-UP HANDLING
+    if awaiting_followup and intent["intent"] == "followup_answer":
+
+        if intent["is_no"]:
+            reply = llm.invoke(
+                "User declined the previous follow-up. Offer another related SoftSuave document topic."
+            ).content.strip()
+
+        elif intent["is_yes"]:
+            reply = llm.invoke(
+                "User accepted the previous follow-up. Continue the explanation in more detail using SoftSuave documents."
+            ).content.strip()
+
+        else:
+            reply = llm.invoke(
+                "Clarify the user's response politely within SoftSuave document context."
+            ).content.strip()
+
+        followup = generate_followup(reply)
+
+        return {
+            "reply": f"{reply}\n\n{followup}",
+            "awaiting_followup": True
+        }
+
+    # GREETING / SMALL TALK
     if intent["intent"] in {"greeting", "small_talk"}:
+
         reply = llm.invoke(
-            f"You are SoftSuave's AI assistant. Respond politely to:\n{text_to_analyze}"
+            f"You are SoftSuave's AI assistant. Respond politely:\n{text_to_analyze}"
         ).content.strip()
 
         followup = generate_followup(reply)
 
         return {
-            "reply": reply,
-            "awaiting_followup": True,
-            "followup_question": followup
+            "reply": f"{reply}\n\n {followup}",
+            "awaiting_followup": True
         }
 
-    # ---------- 3. FOLLOW-UP YES / NO ----------
-    if intent["intent"] == "followup_answer":
-        if intent["is_no"]:
-            reply = llm.invoke(
-                "User said no. Politely offer another SoftSuave document-related topic."
-            ).content.strip()
-
-            followup = generate_followup(reply)
-
-            return {
-                "reply": reply,
-                "awaiting_followup": True,
-                "followup_question": followup
-            }
-
-        if intent["is_yes"]:
-            query = rewrite_query(query, history)
-
-    # ---------- 4. SUMMARIZATION ----------
-    if len(history) >= SUMMARY_TRIGGER * 2:
-        summary = summarize_chat(history)
-        history = summary
-
-    # ---------- 5. QUERY NORMALIZATION ----------
+    #  QUERY NORMALIZATION
     rewritten_query = rewrite_query(query, history)
 
-    # ---------- 6. RAG ----------
+    # RAG
     answer = rag_answer(rewritten_query, history)
 
     if not answer or len(answer.strip()) < 30:
+
         reply = llm.invoke(
-            "Politely state the information is not available in SoftSuave documents."
+            "Politely state that the requested information is not available in SoftSuave company documents."
         ).content.strip()
 
         followup = generate_followup(reply)
 
         return {
-            "reply": reply,
-            "awaiting_followup": True,
-            "followup_question": followup
+            "reply": f"{reply}\n\n {followup}",
+            "awaiting_followup": True
         }
 
-    # ---------- 7. FINAL DOCUMENT ANSWER ----------
+    #FINAL DOCUMENT RESPONSE
     final_answer = llm.invoke(
         f"""
 You are SoftSuave's official AI assistant.
+
 Answer ONLY using the document content below.
+Do NOT add external knowledge.
 
 Document content:
 {answer}
@@ -139,7 +149,6 @@ Document content:
     followup = generate_followup(final_answer)
 
     return {
-        "reply": final_answer,
-        "awaiting_followup": True,
-        "followup_question": followup
+        "reply": f"{final_answer}\n\n {followup}",
+        "awaiting_followup": True
     }
