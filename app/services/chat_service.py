@@ -1,154 +1,235 @@
 import json
 from app.core.llm import llm
-from app.services.rag_service import rag_answer
-from app.services.summarizer import summarize_chat
-from app.services.query_rewrite import rewrite_query
-
-SUMMARY_TRIGGER = 10
+from app.vectorstore.chroma_db import get_vectorstore
 
 
-def analyze_intent(text: str, history: list[str], awaiting_followup: bool) -> dict:
+def unified_reasoning(query: str, history: list[str], awaiting_followup: bool):
+    
+    # RULE-BASED OVERRIDE for Follow-up
+    if awaiting_followup:
+        normalized = query.lower().strip().strip(".,!?")
+        yes_variants = {"yes", "sure", "ok", "okay", "proceed", "go ahead", "continue", "tell me more", "please", "yes please", "yep", "yeah"}
+        no_variants = {"no", "no thanks", "stop", "cancel", "nope", "nah"}
+        
+        if normalized in yes_variants:
+            return {
+                "intent": "followup_answer",
+                "is_yes": True,
+                "is_no": False,
+                "rewritten_query": None
+            }
+        
+        if normalized in no_variants:
+            return {
+                "intent": "followup_answer",
+                "is_yes": False,
+                "is_no": True,
+                "rewritten_query": None
+            }
+
     prompt = f"""
-You are an intent classification engine.
+You are SoftSuave's reasoning engine.
 
-Return ONLY valid JSON.
+Tasks:
+1. ANALYSIS PRIORITY:
+   - Check 'Awaiting Followup' state FIRST.
+   - If True:
+     - User input "Yes", "Yes, please", "Sure", "Proceed", "Okay", "Tell me more", "Please" -> intent: "followup_answer", is_yes: true
+     - User input "No", "No thanks", "Stop", "Cancel" -> intent: "followup_answer", is_no: true
+     - Only if input is clearly a NEW topic -> intent: "document_question"
+   
+2. If 'Awaiting Followup' is False:
+   - "Hi", "Hello" -> intent: "greeting"
+   - Question about company -> intent: "document_question"
 
-Conversation history:
+3. Rewrite query:
+   - If intent is "document_question", rewrite to be self-contained.
+   - Otherwise, return null.
+
+Return STRICT JSON only:
+{{
+  "intent": "greeting" | "small_talk" | "document_question" | "followup_answer",
+  "is_yes": true | false | null,
+  "is_no": true | false | null,
+  "rewritten_query": "string" | null
+}}
+
+Conversation:
 {history}
 
+Current State:
+Awaiting Followup: {awaiting_followup}
+
 User message:
-"{text}"
-
-Is the system awaiting a follow-up answer?
-{awaiting_followup}
-
-Return JSON ONLY:
-{{
-  "intent": "greeting | document_question | followup_answer | small_talk",
-  "is_yes": true | false | null,
-  "is_no": true | false | null
-}}
+"{query}"
 """
-    response = llm.invoke(prompt).content.strip()
 
     try:
+        response = llm.invoke(prompt).content.strip()
+        # Clean up JSON if it contains markdown code blocks
+        if "```json" in response:
+            response = response.split("```json")[1].split("```")[0].strip()
+        elif "```" in response:
+            response = response.split("```")[1].split("```")[0].strip()
+            
         return json.loads(response)
-    except:
+    except Exception as e:
+        print(f"JSON Parsing Error: {e}, Response: {response if 'response' in locals() else 'None'}")
         return {
             "intent": "document_question",
             "is_yes": None,
-            "is_no": None
+            "is_no": None,
+            "rewritten_query": query
         }
 
+def rag_with_followup(query: str, context: str):
 
-def generate_followup(answer: str) -> str:
     prompt = f"""
-You are SoftSuave's AI assistant.
+You are SoftSuave's official AI assistant.
 
-Based on the answer below,
-generate ONE meaningful follow-up question
-strictly related to SoftSuave company documents.
+Rules:
+- Answer ONLY using the provided context.
+- After answering, choose ONE sentence from the SAME context.
+- Convert THAT sentence into a follow-up question.
+- The follow-up MUST be answerable using the SAME context.
+- Do NOT introduce new topics.
+- Do NOT move to another document section.
+- If answer is not found, say:
+  "The requested information is not available in SoftSuave documents."
+  and DO NOT generate follow-up.
 
-Answer:
-{answer}
+Context:
+{context}
 
-Return ONLY the question.
+Question:
+{query}
+
+Return EXACT format:
+
+ANSWER:
+<answer>
+
+FOLLOWUP:
+<question derived directly from a sentence in context>
 """
     return llm.invoke(prompt).content.strip()
+
 
 
 def handle_chat(
     query: str,
     history: list[str],
     followup_answer: str | None = None,
-    awaiting_followup: bool = False
+    awaiting_followup: bool = False,
+    last_context: str | None = None,
+    last_followup_question: str | None = None
 ) -> dict:
 
     history = history or []
 
-    #AUTO SUMMARY EVERY 10 USER TURNS
-    user_turns = len([h for h in history if h.startswith("User:")])
-    if user_turns and user_turns % SUMMARY_TRIGGER == 0:
-        history = summarize_chat(history)
+    if awaiting_followup and not followup_answer:
+        followup_answer = query
 
-    # INTENT ANALYSIS
-    text_to_analyze = followup_answer if awaiting_followup else query
-    intent = analyze_intent(text_to_analyze, history, awaiting_followup)
+    reasoning = unified_reasoning(
+        followup_answer if awaiting_followup else query,
+        history,
+        awaiting_followup
+    )
 
-    # FOLLOW-UP HANDLING
-    if awaiting_followup and intent["intent"] == "followup_answer":
+    intent = reasoning["intent"]
 
-        if intent["is_no"]:
-            reply = llm.invoke(
-                "User declined the previous follow-up. Offer another related SoftSuave document topic."
-            ).content.strip()
-
-        elif intent["is_yes"]:
-            reply = llm.invoke(
-                "User accepted the previous follow-up. Continue the explanation in more detail using SoftSuave documents."
-            ).content.strip()
-
-        else:
-            reply = llm.invoke(
-                "Clarify the user's response politely within SoftSuave document context."
-            ).content.strip()
-
-        followup = generate_followup(reply)
-
+    # ---------------- GREETING ----------------
+    if intent in {"greeting", "small_talk"}:
         return {
-            "reply": f"{reply}\n\n{followup}",
-            "awaiting_followup": True
+            "reply": "Hello! How can I assist you regarding SoftSuave documents today?",
+            "awaiting_followup": False,
+            "last_context": None,
+            "last_followup_question": None
         }
 
-    # GREETING / SMALL TALK
-    if intent["intent"] in {"greeting", "small_talk"}:
+    # ---------------- FOLLOW-UP YES / NO ----------------
+    if intent == "followup_answer" and awaiting_followup:
 
-        reply = llm.invoke(
-            f"You are SoftSuave's AI assistant. Respond politely:\n{text_to_analyze}"
-        ).content.strip()
+        # YES → reuse SAME question + SAME context
+        if reasoning["is_yes"] and last_context and last_followup_question:
+            prompt = f"""
+        You are SoftSuave's official AI assistant.
 
-        followup = generate_followup(reply)
+        Continue answering the following question
+        STRICTLY using the SAME context.
 
+        Do NOT retrieve new topics.
+        Do NOT switch document sections.
+
+        Context:
+        {last_context}
+
+        Question:
+        {last_followup_question}
+
+        Return format:
+
+        ANSWER:
+        <expanded answer>
+
+        FOLLOWUP:
+        <next question within same topic>
+        """
+
+            rag_output = llm.invoke(prompt).content.strip()
+            
+            try:
+                answer = rag_output.split("FOLLOWUP:")[0].replace("ANSWER:", "").strip()
+                followup = rag_output.split("FOLLOWUP:")[1].strip()
+            except:
+                answer = rag_output
+                followup = None
+
+            return {
+                "reply": f"{answer}\n\n{followup}" if followup else answer,
+                "awaiting_followup": True if followup else False,
+                "last_context": last_context,
+                "last_followup_question": followup
+            }
+
+        # NO → exit followup mode
+        if reasoning["is_no"]:
+            return {
+                "reply": "Alright 👍 What would you like to explore about SoftSuave?",
+                "awaiting_followup": False,
+                "last_context": None,
+                "last_followup_question": None
+            }
+
+    # ---------------- NEW DOCUMENT QUESTION ----------------
+
+    rewritten_query = reasoning["rewritten_query"]
+
+    vectordb = get_vectorstore()
+    docs = vectordb.similarity_search(rewritten_query, k=3)
+
+    if not docs:
         return {
-            "reply": f"{reply}\n\n {followup}",
-            "awaiting_followup": True
+            "reply": "The requested information is not available in SoftSuave documents.",
+            "awaiting_followup": False,
+            "last_context": None,
+            "last_followup_question": None
         }
 
-    #  QUERY NORMALIZATION
-    rewritten_query = rewrite_query(query, history)
+    context = "\n\n".join(d.page_content for d in docs)
 
-    # RAG
-    answer = rag_answer(rewritten_query, history)
+    rag_output = rag_with_followup(rewritten_query, context)
 
-    if not answer or len(answer.strip()) < 30:
-
-        reply = llm.invoke(
-            "Politely state that the requested information is not available in SoftSuave company documents."
-        ).content.strip()
-
-        followup = generate_followup(reply)
-
-        return {
-            "reply": f"{reply}\n\n {followup}",
-            "awaiting_followup": True
-        }
-
-    #FINAL DOCUMENT RESPONSE
-    final_answer = llm.invoke(
-        f"""
-You are SoftSuave's official AI assistant.
-
-Answer ONLY using the document content below.
-Do NOT add external knowledge.
-
-Document content:
-{answer}
-"""
-    ).content.strip()
-
-    followup = generate_followup(final_answer)
+    try:
+        answer = rag_output.split("FOLLOWUP:")[0].replace("ANSWER:", "").strip()
+        followup = rag_output.split("FOLLOWUP:")[1].strip()
+    except:
+        answer = rag_output
+        followup = None
 
     return {
-        "reply": f"{final_answer}\n\n {followup}",
-        "awaiting_followup": True
+        "reply": f"{answer}\n\n{followup}" if followup else answer,
+        "awaiting_followup": True if followup else False,
+        "last_context": context,
+        "last_followup_question": followup
     }

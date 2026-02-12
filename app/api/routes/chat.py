@@ -11,6 +11,8 @@ def chat(req: ChatRequest, user: str = Depends(get_current_user)):
         query=req.query,
         history=req.history,
         followup_answer=req.followup_answer,
-        awaiting_followup=req.awaiting_followup
+        awaiting_followup=req.awaiting_followup,
+        last_context=req.last_context,
+        last_followup_question=req.last_followup_question
     )
     return result
