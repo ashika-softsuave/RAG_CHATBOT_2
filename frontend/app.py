@@ -62,6 +62,13 @@ if "current_chat" not in st.session_state:
 if "awaiting_followup" not in st.session_state:
     st.session_state.awaiting_followup = False
 
+if "last_context" not in st.session_state:
+    st.session_state.last_context = None
+
+if "last_followup_question" not in st.session_state:
+    st.session_state.last_followup_question = None
+
+
 #AUTH
 def login_user(username, password):
     res = requests.post(
@@ -180,9 +187,9 @@ if query:
     payload = {
         "query": query,
         "history": chat["history"],
-        "followup_answer": query if st.session_state.awaiting_followup else None,
-        "awaiting_followup": st.session_state.awaiting_followup
-
+        "awaiting_followup": st.session_state.awaiting_followup,
+        "last_context": st.session_state.get("last_context"),
+        "last_followup_question": st.session_state.get("last_followup_question")
     }
 
     res = requests.post(
@@ -192,15 +199,24 @@ if query:
     )
 
     if res.status_code == 200:
-        data = res.json()
+        try:
+            data = res.json()
 
-        reply = data["reply"]
-        chat["messages"].append({"role": "assistant", "content": reply})
+            if not data:
+                st.error("Empty response from backend")
+            else:
+                reply = data.get("reply", "No reply field found.")
+                chat["messages"].append({"role": "assistant", "content": reply})
 
-        # follow-up state
-        st.session_state.awaiting_followup = data["awaiting_followup"]
+                st.session_state.awaiting_followup = data.get("awaiting_followup", False)
+                st.session_state.last_context = data.get("last_context")
+                st.session_state.last_followup_question = data.get("last_followup_question")
 
-        save_store(st.session_state.projects)
-        st.rerun()
+                save_store(st.session_state.projects)
+                st.rerun()
+
+        except Exception as e:
+            st.error(f"Invalid JSON from backend: {e}")
+
     else:
-        st.error("Failed to get response from chatbot")
+        st.error(f"Backend Error: {res.status_code}")

@@ -1,154 +1,176 @@
 import json
 from app.core.llm import llm
-from app.services.rag_service import rag_answer
-from app.services.summarizer import summarize_chat
-from app.services.query_rewrite import rewrite_query
+from app.vectorstore.chroma_db import get_vectorstore
 
-SUMMARY_TRIGGER = 10
+# LLM CALL 1 → ROUTER (ONLY CLASSIFICATION)
 
-
-def analyze_intent(text: str, history: list[str], awaiting_followup: bool) -> dict:
+def classify_message(query: str, awaiting_followup: bool) -> str:
     prompt = f"""
-You are an intent classification engine.
-
-Return ONLY valid JSON.
-
-Conversation history:
-{history}
+You are a classification engine.
 
 User message:
-"{text}"
+"{query}"
 
-Is the system awaiting a follow-up answer?
+System awaiting follow-up:
 {awaiting_followup}
 
-Return JSON ONLY:
+Classify this message into ONE of:
+
+- greeting
+- small_talk
+- new_question
+- followup_reply
+
+Rules:
+- greeting → simple hello/hi
+- small_talk → casual conversation not about documents
+- followup_reply → response to previous follow-up when system is awaiting one
+- new_question → asking new information about SoftSuave
+
+Return STRICT JSON:
+
 {{
-  "intent": "greeting | document_question | followup_answer | small_talk",
-  "is_yes": true | false | null,
-  "is_no": true | false | null
+  "type": "greeting | small_talk | new_question | followup_reply"
 }}
 """
-    response = llm.invoke(prompt).content.strip()
 
     try:
-        return json.loads(response)
+        response = llm.invoke(prompt).content.strip()
+        return json.loads(response)["type"]
     except:
-        return {
-            "intent": "document_question",
-            "is_yes": None,
-            "is_no": None
-        }
+        return "new_question"
 
+# LLM CALL 2 → RAG + FOLLOWUP
+def rag_with_followup(question: str, context: str):
 
-def generate_followup(answer: str) -> str:
     prompt = f"""
-You are SoftSuave's AI assistant.
+You are SoftSuave's official AI assistant.
 
-Based on the answer below,
-generate ONE meaningful follow-up question
-strictly related to SoftSuave company documents.
+STRICT RULES:
+- Answer ONLY using the provided document context.
+- Do NOT use external knowledge.
+- Do NOT guess.
+- If answer is not explicitly in context, respond EXACTLY:
+  "The requested information is not available in SoftSuave documents."
+  and DO NOT generate follow-up.
 
-Answer:
-{answer}
+After every valid answer:
+- Generate ONE follow-up question.
+- It must come strictly from the SAME context.
+- It must be answerable from the SAME context.
+- Do NOT introduce new topics.
 
-Return ONLY the question.
+Context:
+{context}
+
+Question:
+{question}
+
+Return EXACT format:
+
+ANSWER:
+<answer>
+
+FOLLOWUP:
+<question or None>
 """
-    return llm.invoke(prompt).content.strip()
 
+    response = llm.invoke(prompt).content.strip()
 
+    answer = None
+    followup = None
+
+    if "ANSWER:" in response:
+        part = response.split("ANSWER:")[1]
+        if "FOLLOWUP:" in part:
+            answer = part.split("FOLLOWUP:")[0].strip()
+            followup = part.split("FOLLOWUP:")[1].strip()
+            if followup.lower() in ["none", "null", ""]:
+                followup = None
+        else:
+            answer = part.strip()
+    else:
+        answer = response
+
+    return answer, followup
+
+# MAIN HANDLE_CHAT (STABLE)
 def handle_chat(
     query: str,
     history: list[str],
-    followup_answer: str | None = None,
-    awaiting_followup: bool = False
-) -> dict:
+    awaiting_followup: bool = False,
+    last_context: str | None = None,
+    last_followup_question: str | None = None
+):
 
-    history = history or []
+    vectordb = get_vectorstore()
 
-    #AUTO SUMMARY EVERY 10 USER TURNS
-    user_turns = len([h for h in history if h.startswith("User:")])
-    if user_turns and user_turns % SUMMARY_TRIGGER == 0:
-        history = summarize_chat(history)
+    # ROUTER
+    message_type = classify_message(query, awaiting_followup)
 
-    # INTENT ANALYSIS
-    text_to_analyze = followup_answer if awaiting_followup else query
-    intent = analyze_intent(text_to_analyze, history, awaiting_followup)
-
-    # FOLLOW-UP HANDLING
-    if awaiting_followup and intent["intent"] == "followup_answer":
-
-        if intent["is_no"]:
-            reply = llm.invoke(
-                "User declined the previous follow-up. Offer another related SoftSuave document topic."
-            ).content.strip()
-
-        elif intent["is_yes"]:
-            reply = llm.invoke(
-                "User accepted the previous follow-up. Continue the explanation in more detail using SoftSuave documents."
-            ).content.strip()
-
-        else:
-            reply = llm.invoke(
-                "Clarify the user's response politely within SoftSuave document context."
-            ).content.strip()
-
-        followup = generate_followup(reply)
-
+    # GREETING
+    if message_type == "greeting":
         return {
-            "reply": f"{reply}\n\n{followup}",
-            "awaiting_followup": True
+            "reply": "Hello 👋 How can I assist you regarding SoftSuave documents today?",
+            "awaiting_followup": False,
+            "last_context": None,
+            "last_followup_question": None
         }
 
-    # GREETING / SMALL TALK
-    if intent["intent"] in {"greeting", "small_talk"}:
-
-        reply = llm.invoke(
-            f"You are SoftSuave's AI assistant. Respond politely:\n{text_to_analyze}"
-        ).content.strip()
-
-        followup = generate_followup(reply)
-
+    # SMALL TALK
+    if message_type == "small_talk":
         return {
-            "reply": f"{reply}\n\n {followup}",
-            "awaiting_followup": True
+            "reply": "I'm here to assist you with information about SoftSuave documents. What would you like to know?",
+            "awaiting_followup": False,
+            "last_context": None,
+            "last_followup_question": None
         }
 
-    #  QUERY NORMALIZATION
-    rewritten_query = rewrite_query(query, history)
+    # FOLLOW-UP REPLY
+    if message_type == "followup_reply" and awaiting_followup:
 
-    # RAG
-    answer = rag_answer(rewritten_query, history)
+        if not last_context or not last_followup_question:
+            return {
+                "reply": "The requested information is not available in SoftSuave documents.",
+                "awaiting_followup": False,
+                "last_context": None,
+                "last_followup_question": None
+            }
 
-    if not answer or len(answer.strip()) < 30:
-
-        reply = llm.invoke(
-            "Politely state that the requested information is not available in SoftSuave company documents."
-        ).content.strip()
-
-        followup = generate_followup(reply)
+        answer, followup = rag_with_followup(
+            last_followup_question,
+            last_context
+        )
 
         return {
-            "reply": f"{reply}\n\n {followup}",
-            "awaiting_followup": True
+            "reply": f"{answer}\n\n{followup}" if followup else answer,
+            "awaiting_followup": True if followup else False,
+            "last_context": last_context,
+            "last_followup_question": followup
         }
 
-    #FINAL DOCUMENT RESPONSE
-    final_answer = llm.invoke(
-        f"""
-You are SoftSuave's official AI assistant.
+    # NEW QUESTION
+    docs = vectordb.similarity_search(query, k=3)
 
-Answer ONLY using the document content below.
-Do NOT add external knowledge.
+    if not docs:
+        return {
+            "reply": "The requested information is not available in SoftSuave documents.",
+            "awaiting_followup": False,
+            "last_context": None,
+            "last_followup_question": None
+        }
 
-Document content:
-{answer}
-"""
-    ).content.strip()
+    context = "\n\n".join(d.page_content for d in docs)
 
-    followup = generate_followup(final_answer)
+    answer, followup = rag_with_followup(query, context)
+    print("DEBUG:", awaiting_followup, last_followup_question is not None)
 
     return {
-        "reply": f"{final_answer}\n\n {followup}",
-        "awaiting_followup": True
+        "reply": f"{answer}\n\n{followup}" if followup else answer,
+        "awaiting_followup": True if followup else False,
+        "last_context": context,
+        "last_followup_question": followup
     }
+
+
+
