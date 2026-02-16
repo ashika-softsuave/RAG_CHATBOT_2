@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SoftSuave Login</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="centered">
+
+<div class="card">
+    <h2>🔐 SoftSuave RAG Chatbot</h2>
+
+    <input id="email" placeholder="Email">
+    <input id="password" type="password" placeholder="Password">
+
+    <button onclick="login()">Login</button>
+    <button onclick="signup()">Signup</button>
+
+    <p id="error"></p>
+</div>
+
+<script>
+async function login() {
+    const res = await fetch("/auth/login", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            username: document.getElementById("email").value,
+            password: document.getElementById("password").value
+        })
+    });
+
+    if(res.ok){
+        const data = await res.json();
+        localStorage.setItem("token", data.access_token);
+        window.location.href = "/chat";
+    } else {
+        document.getElementById("error").innerText = "Invalid credentials";
+    }
+}
+
+async function signup() {
+    const res = await fetch("/auth/register", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            username: document.getElementById("email").value,
+            password: document.getElementById("password").value
+        })
+    });
+
+    if(res.ok){
+        alert("Signup successful");
+    } else {
+        document.getElementById("error").innerText = "User exists";
+    }
+}
+</script>
+
+</body>
+</html>
