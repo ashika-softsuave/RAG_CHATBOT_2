@@ -16,7 +16,7 @@ def upload_document(
     file: UploadFile,
     current_user: str = Depends(get_current_user)
 ):
-    # ✅ ADMIN CHECK
+    # ADMIN CHECK
     if current_user != ADMIN_EMAIL:
         raise HTTPException(
             status_code=403,
@@ -26,7 +26,8 @@ def upload_document(
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     path = f"{UPLOAD_DIR}/{file.filename}"
 
-    with open(path, "wb") as f:
+    with open(path, "wb") as f: #prevent corruption and ensure exact byte-level copying
+
         shutil.copyfileobj(file.file, f)
 
     docs = load_document(path)

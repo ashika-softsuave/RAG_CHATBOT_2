@@ -1,7 +1,5 @@
-import os
+from app.core.config import OPENAI_API_KEY
 from langchain_openai import ChatOpenAI
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY not found in environment")
