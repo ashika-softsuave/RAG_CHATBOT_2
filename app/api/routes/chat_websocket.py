@@ -3,11 +3,10 @@ from app.services.chat_service import handle_chat
 
 chat_ws_router = APIRouter(prefix="/chat", tags=["Chat"])
 
-
 @chat_ws_router.websocket("/ws")
 async def chat_ws(websocket: WebSocket):
     await websocket.accept()
-
+    #To maintain conversation state per client
     awaiting_followup = False
     last_context = None
     last_followup_question = None

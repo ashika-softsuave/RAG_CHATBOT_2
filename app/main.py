@@ -10,12 +10,21 @@ from app.api.routes import chat, admin_upload, auth, frontend
 from app.db.database import engine
 from app.db import models
 from app.socket_server import sio
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="RAG Chatbot")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 models.Base.metadata.create_all(bind=engine)
 
-# ✅ Absolute static path
+# Absolute static path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
@@ -28,5 +37,5 @@ app.include_router(chat.router)
 app.include_router(admin_upload.router)
 app.include_router(frontend.router)
 
-# ✅ Mount Socket.IO as middleware, NOT replace app
-app.mount("/", ASGIApp(sio, other_asgi_app=app))
+application = ASGIApp(sio, other_asgi_app=app)
+
