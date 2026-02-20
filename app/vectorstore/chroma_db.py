@@ -1,7 +1,8 @@
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from app.core.config import CHROMA_PATH
+import re
+from langchain.schema import Document
 
 # Embeddings
 embeddings = OpenAIEmbeddings()
@@ -13,31 +14,60 @@ def get_vectorstore():
         embedding_function=embeddings
     )
 
-# Chunking Function (NEW)
-def chunk_documents(documents):
+# SECTION-BASED CHUNKING
+def chunk_by_section(documents):
     """
-    Split documents into smaller chunks before storing in vector DB.
+    Split handbook by section headings like:
+    1. INTRODUCTION
+    1.1 ABOUT SOFT SUAVE
+    1.2 OUR VALUES
     """
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,      # Ideal for company documents
-        chunk_overlap=100    # Prevents losing boundary context
-    )
+    # Improved regex for headings like:
+    # 1. INTRODUCTION
+    # 1.1 ABOUT SOFT SUAVE
+    section_pattern = r"\n(\d+\.\d*\.?\s+[A-Z][A-Z\s]+)"
 
-    chunks = text_splitter.split_documents(documents)
+    new_chunks = []
 
-    return chunks
+    for doc in documents:
+        text = doc.page_content
+
+        splits = re.split(section_pattern, text)
+
+        current_section = "General"
+
+        for part in splits:
+            part = part.strip()
+            if not part:
+                continue
+
+            if re.match(r"\d+\.\d*\.?\s+[A-Z][A-Z\s]+", part):
+                current_section = part
+            else:
+                new_doc = Document(
+                    page_content=part,
+                    metadata={
+                        "section": current_section,
+                        "source": doc.metadata.get("source", "handbook")
+                    }
+                )
+                new_chunks.append(new_doc)
+
+    return new_chunks
+
 
 # Add Documents to Vector Store
 def add_documents_to_vectorstore(documents):
     """
-    Chunk documents and store them in Chroma.
+    Chunk documents by section and store in Chroma.
     """
 
     vectordb = get_vectorstore()
 
-    #Chunk before embedding
-    chunks = chunk_documents(documents)
+    #Use section-based chunking
+    chunks = chunk_by_section(documents)
 
     vectordb.add_documents(chunks)
 
+    vectordb.persist()

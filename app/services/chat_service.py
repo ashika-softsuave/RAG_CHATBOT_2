@@ -41,8 +41,6 @@ Casual conversation not related to SoftSuave documents.
 new_question:
 Any independent factual question.
 Also classify as new_question if:
-- The user rejects or declines the previous follow-up question.
-- The user stops the follow-up flow.
 - The user changes topic.
 - The user does not clearly continue the follow-up.
 
@@ -73,6 +71,8 @@ Return STRICT JSON:
         return json.loads(response)["type"]
     except:
         return "new_question"
+
+
 def rewrite_query_naturally(
     query: str,
     history: list[str],
@@ -146,14 +146,14 @@ def rag_with_followup(
       "The requested information is not available ."
       if the Context truly does not contain relevant information.
 
-    FOLLOW-UP RULES:
-    - Follow-up question is OPTIONAL.
-    - Generate at most ONE follow-up question.
-    -The follow-up must be answerable from the broader document,
-  even if not fully contained in the current Context..
-    - Do NOT generate a follow-up if the Context does not clearly support it.
-    - Do NOT generate speculative or broad follow-up questions.
-    - If no suitable follow-up exists, return FOLLOWUP: None.
+FOLLOW-UP RULES:
+- Follow-up question is OPTIONAL.
+- Generate at most ONE follow-up question.
+- The follow-up must relate to another section of the document.
+- The follow-up should be relevant to the current topic.
+- Do NOT repeat previously asked follow-up questions.
+- Do NOT generate speculative or unrelated questions.
+- If no suitable follow-up exists, return FOLLOWUP: None.
 
     Recent Conversation:
     {short_history}
@@ -204,16 +204,20 @@ def handle_chat(
     last_context: str | None = None,
     last_followup_question: str | None = None
 ):
-    docs = []
     vectordb = get_vectorstore()
 
-    # CLASSIFY
+    # -----------------------------
+    # 1️⃣ CLASSIFY MESSAGE
+    # -----------------------------
     message_type = classify_message(
         query,
         awaiting_followup,
         last_followup_question
     )
-    # GREETING
+
+    # -----------------------------
+    # 2️⃣ GREETING
+    # -----------------------------
     if message_type == "greeting":
         return {
             "reply": "Hello 👋 How can I assist you regarding SoftSuave today?",
@@ -221,7 +225,10 @@ def handle_chat(
             "last_context": None,
             "last_followup_question": None
         }
-    # SMALL TALK
+
+    # -----------------------------
+    # 3️⃣ SMALL TALK
+    # -----------------------------
     if message_type == "small_talk":
         return {
             "reply": "I'm here to assist you with information about SoftSuave. What would you like to know?",
@@ -230,33 +237,88 @@ def handle_chat(
             "last_followup_question": None
         }
 
-    # FOLLOW-UP REPLY
-    if message_type == "followup_reply" and awaiting_followup:
+    # =========================================================
+    # 4️⃣ FOLLOW-UP FLOW (YES / NO Handling)
+    # =========================================================
 
-        if not last_context or not last_followup_question:
+    if awaiting_followup:
+
+        normalized = query.strip().lower()
+
+        # -----------------------------
+        # 🔵 USER SAID YES → Answer follow-up
+        # -----------------------------
+        if message_type == "followup_reply":
+
+            followup_query = last_followup_question
+
+            # 🔥 RE-RETRIEVE for follow-up (IMPORTANT FIX)
+            results = vectordb.similarity_search_with_score(followup_query, k=6)
+            retrieved_docs = [doc for doc, score in results]
+
+            if not retrieved_docs:
+                return {
+                    "reply": "The requested information is not available.",
+                    "awaiting_followup": False,
+                    "last_context": None,
+                    "last_followup_question": None
+                }
+
+            retrieved_docs = list({doc.page_content: doc for doc in retrieved_docs}.values())
+
+            docs = rerank_documents(followup_query, retrieved_docs, top_k=3)
+
+            if not docs:
+                return {
+                    "reply": "The requested information is not available.",
+                    "awaiting_followup": False,
+                    "last_context": None,
+                    "last_followup_question": None
+                }
+
+            new_context = "\n\n".join(d.page_content for d in docs)
+
+            answer, followup = rag_with_followup(
+                followup_query,
+                new_context,
+                history
+            )
+
+            cleaned_followup = None
+            if followup:
+                cleaned_followup = followup.strip()
+                if cleaned_followup.lower() in ["none", "null", ""]:
+                    cleaned_followup = None
+
+            reply_text = answer.strip()
+
+            if cleaned_followup:
+                reply_text = f"{reply_text}\n\n{cleaned_followup}"
+
             return {
-                "reply": "The requested information is not available",
+                "reply": reply_text,
+                "awaiting_followup": bool(cleaned_followup),
+                "last_context": new_context,
+                "last_followup_question": cleaned_followup
+            }
+
+        # -----------------------------
+        # 🔴 USER SAID NO → Do NOT answer follow-up
+        # -----------------------------
+        else:
+            return {
+                "reply": "Alright 👍 Would you like to explore another section of the Employee Handbook?",
                 "awaiting_followup": False,
                 "last_context": None,
                 "last_followup_question": None
             }
 
-        answer, followup = rag_with_followup(
-            last_followup_question,
-            last_context
-        )
+    # =========================================================
+    # 5️⃣ NEW QUESTION FLOW
+    # =========================================================
 
-        return {
-            "reply": f"{answer}\n\n{followup}" if followup else answer,
-            "awaiting_followup": True if followup else False,
-            "last_context": last_context,
-            "last_followup_question": followup
-        }
-
-    # Rewrite naturally
     rewritten_query = rewrite_query_naturally(query, history)
 
-    # Retrieve
     results = vectordb.similarity_search_with_score(rewritten_query, k=6)
 
     if not results:
@@ -267,9 +329,9 @@ def handle_chat(
             "last_followup_question": None
         }
 
-    filtered_docs = [doc for doc, score in results]
+    retrieved_docs = [doc for doc, score in results]
 
-    if not filtered_docs:
+    if not retrieved_docs:
         return {
             "reply": "No relevant information found.",
             "awaiting_followup": False,
@@ -277,7 +339,9 @@ def handle_chat(
             "last_followup_question": None
         }
 
-    docs = rerank_documents(rewritten_query, filtered_docs, top_k=3)
+    retrieved_docs = list({doc.page_content: doc for doc in retrieved_docs}.values())
+
+    docs = rerank_documents(rewritten_query, retrieved_docs, top_k=3)
 
     if not docs:
         return {
@@ -287,34 +351,20 @@ def handle_chat(
             "last_followup_question": None
         }
 
-    print("Number of results retrieved:", len(results))
-
-    for i, (doc, score) in enumerate(results):
-        print(f"Result {i} length:", len(doc.page_content))
-    # Filter by threshold
-    filtered_docs = list({doc.page_content: doc for doc in filtered_docs}.values())
-
     context = "\n\n".join(d.page_content for d in docs)
 
-    #Generate answer
     answer, followup = rag_with_followup(
         rewritten_query,
         context,
         history
     )
 
-    print(rewritten_query)
-    # Clean followup safely
+    cleaned_followup = None
     if followup:
         cleaned_followup = followup.strip()
-
-        # Remove accidental "None" text
         if cleaned_followup.lower() in ["none", "null", ""]:
             cleaned_followup = None
-    else:
-        cleaned_followup = None
 
-    # Build reply safely
     reply_text = answer.strip()
 
     if cleaned_followup:
