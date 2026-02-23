@@ -3,7 +3,6 @@ from sentence_transformers import CrossEncoder
 # Load once globally
 reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-
 def rerank_documents(query: str, docs: list, top_k: int = 3):
     """
     Rerank documents using CrossEncoder.
